@@ -4,13 +4,19 @@ const BASE = '';
 
 export async function listFiles(path: string): Promise<DirectoryListing> {
   const res = await fetch(`${BASE}/api/files?path=${encodeURIComponent(path)}`);
-  if (!res.ok) throw new Error('Failed to list files');
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('AUTH_REQUIRED');
+    throw new Error('Failed to list files');
+  }
   return res.json();
 }
 
 export async function getTree(path = '/'): Promise<{ tree: TreeNode[] }> {
   const res = await fetch(`${BASE}/api/tree?path=${encodeURIComponent(path)}`);
-  if (!res.ok) throw new Error('Failed to get tree');
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('AUTH_REQUIRED');
+    throw new Error('Failed to get tree');
+  }
   return res.json();
 }
 

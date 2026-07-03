@@ -5,14 +5,12 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Optional
+
 from dotenv import load_dotenv
-
-load_dotenv()
-
 from fastapi import FastAPI, HTTPException, Cookie, Response, Request, Query
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
 
 app = FastAPI(title="Artifact")
 
@@ -28,19 +26,13 @@ ALLOWED_DOMAIN = os.environ.get("ARTIFACT_ALLOWED_DOMAIN", "")
 active_sessions: dict[str, dict] = {}
 SESSION_TTL = 86400
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+MCP_TOKEN = os.environ.get("ARTIFACT_MCP_TOKEN", "")
 
 
 def resolve_path(user_path: str) -> Path:
     cleaned = PurePosixPath("/" + user_path.strip("/"))
     resolved = (UPLOAD_DIR / cleaned.relative_to("/")).resolve()
-    if not str(resolved).startswith(str(UPLOAD_DIR.resolve())):
+    if not resolved.is_relative_to(UPLOAD_DIR.resolve()):
         raise HTTPException(status_code=400, detail="Invalid path")
     return resolved
 
@@ -65,11 +57,6 @@ def get_session_email(session_token: Optional[str]) -> Optional[str]:
 def require_auth(session_token: Optional[str]):
     if not is_authenticated(session_token):
         raise HTTPException(status_code=401, detail="Authentication required")
-
-
-def require_auth_if_google(session_token: Optional[str]):
-    if AUTH_MODE == "google":
-        require_auth(session_token)
 
 
 # Mount MCP server at /mcp
@@ -116,6 +103,45 @@ try:
             await self.asgi_app(scope, receive, send)
 
     app.add_middleware(_MCPTrailingSlash)
+
+    # Without Google OAuth the MCP endpoint has no auth of its own. Gate it
+    # with a static bearer token (ARTIFACT_MCP_TOKEN) when configured.
+    from mcp_server import auth_provider as _mcp_auth_provider
+    if _mcp_auth_provider is None:
+        if MCP_TOKEN:
+            class _MCPBearerAuth:
+                def __init__(self, asgi_app):
+                    self.asgi_app = asgi_app
+
+                async def __call__(self, scope, receive, send):
+                    path = scope.get("path", "")
+                    if scope.get("type") == "http" and (path == "/mcp" or path.startswith("/mcp/")):
+                        provided = dict(scope.get("headers") or []).get(b"authorization", b"")
+                        expected = f"Bearer {MCP_TOKEN}".encode()
+                        if not secrets.compare_digest(provided, expected):
+                            await send({
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [
+                                    (b"content-type", b"application/json"),
+                                    (b"www-authenticate", b"Bearer"),
+                                ],
+                            })
+                            await send({
+                                "type": "http.response.body",
+                                "body": b'{"detail": "Unauthorized"}',
+                            })
+                            return
+                    await self.asgi_app(scope, receive, send)
+
+            app.add_middleware(_MCPBearerAuth)
+        else:
+            import sys
+            print(
+                "WARNING: /mcp is UNAUTHENTICATED — anyone who can reach this host has "
+                "full file access. Set ARTIFACT_MCP_TOKEN or configure Google OAuth.",
+                file=sys.stderr,
+            )
 except Exception as e:
     import sys
     print(f"Warning: MCP server not mounted: {e}", file=sys.stderr)
@@ -255,7 +281,7 @@ def format_size(size_bytes: int) -> str:
 
 @app.get("/api/files")
 def list_files(path: str = "/", artifact_session: Optional[str] = Cookie(None)):
-    require_auth_if_google(artifact_session)
+    require_auth(artifact_session)
     resolved = resolve_path(path)
     if not resolved.exists():
         return {"folders": [], "files": []}
@@ -283,7 +309,7 @@ def list_files(path: str = "/", artifact_session: Optional[str] = Cookie(None)):
 
 @app.get("/api/tree")
 def get_tree(artifact_session: Optional[str] = Cookie(None)):
-    require_auth_if_google(artifact_session)
+    require_auth(artifact_session)
     def walk(dir_path: Path, rel: str) -> list:
         result = []
         if not dir_path.exists():
@@ -312,8 +338,7 @@ async def upload_files(
 
     form = await request.form()
     uploaded = []
-    for key in form:
-        upload = form[key]
+    for key, upload in form.multi_items():
         if not hasattr(upload, "filename") or not upload.filename:
             continue
         if not upload.filename.endswith(".html"):
@@ -427,14 +452,21 @@ def serve_public(file_path: str, artifact_session: Optional[str] = Cookie(None))
         raise HTTPException(status_code=404, detail="File not found")
     if resolved.suffix.lower() != ".html":
         raise HTTPException(status_code=404, detail="File not found")
-    return HTMLResponse(content=resolved.read_text(encoding="utf-8", errors="replace"))
+    # CSP sandbox: shared docs run in an opaque origin so uploaded HTML cannot
+    # call the admin write APIs with the viewer's session cookie.
+    return HTMLResponse(
+        content=resolved.read_text(encoding="utf-8", errors="replace"),
+        headers={"Content-Security-Policy": "sandbox allow-scripts"},
+    )
 
 
 # Serve frontend static files in production
 if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
-        file_path = FRONTEND_DIR / full_path
+        file_path = (FRONTEND_DIR / full_path).resolve()
+        if not file_path.is_relative_to(FRONTEND_DIR.resolve()):
+            raise HTTPException(status_code=404)
         if file_path.is_file():
             media_type = None
             if file_path.suffix == ".js":

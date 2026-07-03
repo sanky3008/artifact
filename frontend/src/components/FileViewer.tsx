@@ -1,5 +1,6 @@
 import { ArrowLeftIcon, FileHtmlIcon, CopyIcon, ExternalLinkIcon, LinkIcon } from './Icons';
 import { Button, useToast } from './ui';
+import { encodePath } from '../nav';
 
 interface FileViewerProps {
   fileName: string;
@@ -9,7 +10,7 @@ interface FileViewerProps {
 
 export function FileViewer({ fileName, path, onBack }: FileViewerProps) {
   const toast = useToast();
-  const publicPath = `/v${path === '/' ? '' : path}/${fileName}`;
+  const publicPath = encodePath(`/v${path === '/' ? '' : path}/${fileName}`);
   const publicUrl = window.location.origin + publicPath;
 
   const handleCopyLink = () => {
@@ -44,7 +45,7 @@ export function FileViewer({ fileName, path, onBack }: FileViewerProps) {
       <div className="viewer__frame">
         <iframe
           src={publicPath}
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
           title={fileName}
         />
       </div>

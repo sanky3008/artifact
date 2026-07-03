@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef, type DragEvent } from 'react';
 import type { FileItem, TreeNode } from '../types';
 import { FolderIcon, FolderOpenIcon, FileHtmlIcon, ChevronRightIcon, ChevronDownIcon, MoreIcon, LinkIcon, ExternalLinkIcon, EditIcon, TrashIcon, PlusIcon, UploadIcon } from './Icons';
-import { Button, Breadcrumb, ContextMenu, EmptyState, type ContextMenuItem } from './ui';
+import { Button, Breadcrumb, ContextMenu, EmptyState, NavLink, type ContextMenuItem } from './ui';
+import { browseUrl, isPlainClick } from '../nav';
 
 interface ExplorerViewProps {
   currentPath: string;
@@ -34,20 +35,21 @@ function SidebarTreeItem({ node, currentPath, onNavigate, depth = 0, onDrop }: {
 
   return (
     <div>
-      <button
+      <NavLink
+        href={browseUrl(node.path)}
         className={`sidebar-item ${isActive ? 'sidebar-item--active' : ''} ${dragOver ? 'sidebar-item--drag-over' : ''}`}
         style={{ paddingLeft: 12 + depth * 16 }}
-        onClick={() => { onNavigate(node.path); setExpanded(true); }}
+        onNavigate={() => { onNavigate(node.path); setExpanded(true); }}
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={e => { e.preventDefault(); setDragOver(false); onDrop(node.path, e); }}
       >
-        <span className="sidebar-item__chevron" onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}>
+        <span className="sidebar-item__chevron" onClick={e => { e.preventDefault(); e.stopPropagation(); setExpanded(!expanded); }}>
           {hasChildren ? (expanded ? <ChevronDownIcon width={14} height={14} /> : <ChevronRightIcon width={14} height={14} />) : <span style={{ width: 14 }}></span>}
         </span>
         {isActive || isParent ? <FolderOpenIcon width={16} height={16} style={{ color: 'var(--accent)', flexShrink: 0 }} /> : <FolderIcon width={16} height={16} style={{ flexShrink: 0 }} />}
         <span className="sidebar-item__name">{node.name}</span>
-      </button>
+      </NavLink>
       {expanded && hasChildren && node.children.map(child => (
         <SidebarTreeItem
           key={child.path}
@@ -209,7 +211,7 @@ export function ExplorerView({ currentPath, folders, files, tree, onNavigate, on
                 return (
                   <tr key={folder}
                     className={`explorer__row explorer__row--folder ${dragOverFolder === folder ? 'explorer__row--drag-over' : ''} ${draggingItem === folder ? 'explorer__row--dragging' : ''}`}
-                    onClick={() => !isRenaming && onNavigate(folderPath)}
+                    onClick={e => { if (e.detail === 1 && !isRenaming && isPlainClick(e)) onNavigate(folderPath); }}
                     onContextMenu={e => handleContextMenu(e, { name: folder, type: 'folder' })}
                     draggable={!isRenaming}
                     onDragStart={e => handleDragStart(e, folder, 'folder')}
@@ -231,7 +233,9 @@ export function ExplorerView({ currentPath, folders, files, tree, onNavigate, on
                           onClick={e => e.stopPropagation()}
                         />
                       ) : (
-                        <span>{folder}</span>
+                        <NavLink href={browseUrl(folderPath)} className="explorer__name-link" onNavigate={() => onNavigate(folderPath)}>
+                          {folder}
+                        </NavLink>
                       )}
                     </td>
                     <td className="explorer__td explorer__td--size">&mdash;</td>
@@ -268,7 +272,9 @@ export function ExplorerView({ currentPath, folders, files, tree, onNavigate, on
                           onClick={e => e.stopPropagation()}
                         />
                       ) : (
-                        <span>{file.name}</span>
+                        <NavLink href={browseUrl(currentPath, file.name)} className="explorer__name-link" onNavigate={() => onOpenFile(file)}>
+                          {file.name}
+                        </NavLink>
                       )}
                     </td>
                     <td className="explorer__td explorer__td--size">{file.size}</td>

@@ -1,5 +1,32 @@
-import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode, type KeyboardEvent as ReactKeyboardEvent, type AnchorHTMLAttributes } from 'react';
 import { XIcon, ChevronRightIcon, HomeIcon } from './Icons';
+import { browseUrl, isPlainClick } from '../nav';
+
+// ═══════════════════════════════════════
+// NAV LINK — a real <a href> so cmd/ctrl/middle-click and "open in new tab"
+// work natively; plain left-clicks are intercepted for SPA navigation.
+// ═══════════════════════════════════════
+interface NavLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
+  href: string;
+  onNavigate: () => void;
+}
+
+export function NavLink({ href, onNavigate, children, ...rest }: NavLinkProps) {
+  return (
+    <a
+      href={href}
+      draggable={false} // don't hijack row drag-and-drop with the anchor's native URL drag
+      onClick={e => {
+        if (!isPlainClick(e)) return; // let the browser open a new tab/window
+        e.preventDefault();
+        onNavigate();
+      }}
+      {...rest}
+    >
+      {children}
+    </a>
+  );
+}
 
 // ═══════════════════════════════════════
 // BUTTON
@@ -94,19 +121,20 @@ export function Modal({ title, children, onClose, width = 400 }: ModalProps) {
 // ═══════════════════════════════════════
 // TOAST
 // ═══════════════════════════════════════
-const ToastContext = createContext<((msg: string) => void) | null>(null);
+const ToastContext = createContext<((msg: string, kind?: 'error') => void) | null>(null);
 
 interface Toast {
   id: number;
   message: string;
+  kind?: 'error';
 }
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const addToast = useCallback((message: string) => {
+  const addToast = useCallback((message: string, kind?: 'error') => {
     const id = Date.now() + Math.random();
-    setToasts(prev => [...prev, { id, message }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 2500);
+    setToasts(prev => [...prev, { id, message, kind }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), kind === 'error' ? 6000 : 2500);
   }, []);
 
   return (
@@ -114,7 +142,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className="toast-container">
         {toasts.map(t => (
-          <div key={t.id} className="toast">{t.message}</div>
+          <div key={t.id} className={`toast ${t.kind === 'error' ? 'toast--error' : ''}`}>{t.message}</div>
         ))}
       </div>
     </ToastContext.Provider>
@@ -145,12 +173,13 @@ export function Breadcrumb({ path, onNavigate }: BreadcrumbProps) {
         return (
           <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             {i > 0 && <ChevronRightIcon width={14} height={14} className="breadcrumb__sep" />}
-            <button
+            <NavLink
+              href={browseUrl(target)}
               className={`breadcrumb__item ${isLast ? 'breadcrumb__item--active' : ''}`}
-              onClick={() => onNavigate(target)}
+              onNavigate={() => onNavigate(target)}
             >
               {i === 0 ? <HomeIcon width={15} height={15} /> : part}
-            </button>
+            </NavLink>
           </span>
         );
       })}

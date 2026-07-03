@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { FileItem, TreeNode, AuthStatus } from './types';
 import * as api from './api';
+import { encodePath, browseUrl, locationFromUrl } from './nav';
 import { ToastProvider, useToast } from './components/ui';
 import { LockIcon, UnlockIcon, SettingsIcon } from './components/Icons';
 import { ExplorerView } from './components/ExplorerView';
@@ -32,23 +33,49 @@ function AppInner() {
   const [accentColor, setAccentColor] = useState(saved.accentColor);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [currentPath, setCurrentPath] = useState('/');
-  const [viewingFile, setViewingFile] = useState<FileItem | null>(null);
+  const [loc, setLoc] = useState(locationFromUrl);
+  const { dir: currentPath, file: viewingFile } = loc;
+
+  const navigate = useCallback((dir: string, file: string | null = null) => {
+    const url = browseUrl(dir, file);
+    // Idempotent: repeated navigation to the current URL (e.g. the second
+    // click of a double-click on a folder row) is dropped.
+    if (url === window.location.pathname + window.location.search) return;
+    history.pushState(null, '', url);
+    setLoc({ dir, file });
+  }, []);
+
+  useEffect(() => {
+    if (!window.location.pathname.startsWith('/browse')) {
+      history.replaceState(null, '', '/browse');
+    }
+    const onPop = () => setLoc(locationFromUrl());
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  useEffect(() => {
+    document.title = viewingFile ? `${viewingFile} — Artifact` : currentPath === '/' ? 'Artifact' : `${currentPath} — Artifact`;
+  }, [currentPath, viewingFile]);
+
   const [isAuth, setIsAuth] = useState(false);
   const [authMode, setAuthMode] = useState<'password' | 'google'>('password');
   const [googleClientId, setGoogleClientId] = useState('');
   const [allowedDomain, setAllowedDomain] = useState('');
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [showPassword, setShowPassword] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [showDelete, setShowDelete] = useState<{ name: string; type: string } | null>(null);
-  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
 
   const [folders, setFolders] = useState<string[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
+  // The path the current folders/files were fetched for. Row paths are computed
+  // from this, not from currentPath — while a navigation's fetch is in flight,
+  // the displayed rows still belong to the previous folder.
+  const [listingPath, setListingPath] = useState('/');
+  const [filesLoading, setFilesLoading] = useState(true);
 
   const toast = useToast();
 
@@ -88,91 +115,87 @@ function AppInner() {
       setFolders(listing.folders);
       setFiles(listing.files);
       setTree(treeData.tree);
-    } catch {
-      // In google mode, 401 on file listing means not authenticated
+      setListingPath(currentPath);
+    } catch (err: any) {
+      if (err.message === 'AUTH_REQUIRED') {
+        setIsAuth(false);
+      } else {
+        toast('Failed to load files', 'error');
+      }
+    } finally {
+      setFilesLoading(false);
     }
-  }, [currentPath]);
+  }, [currentPath, toast]);
 
   useEffect(() => {
-    if (authLoading) return;
-    if (authMode === 'google' && !isAuth) return;
+    if (authLoading || !isAuth) return;
     refreshFiles();
-  }, [refreshFiles, authLoading, authMode, isAuth]);
-
-  const requireAuth = (callback: () => void) => {
-    if (isAuth) { callback(); return; }
-    setPendingAction(() => callback);
-    setShowPassword(true);
-  };
-
-  const handleAuthSuccess = () => {
-    setIsAuth(true);
-    setShowPassword(false);
-    if (pendingAction) { pendingAction(); setPendingAction(null); }
-  };
+  }, [refreshFiles, authLoading, isAuth]);
 
   const handleAction = (action: string, item?: any) => {
     switch (action) {
       case 'upload':
-        requireAuth(() => setShowUpload(true));
+        setShowUpload(true);
         break;
       case 'new-folder':
-        requireAuth(() => setShowNewFolder(true));
+        setShowNewFolder(true);
         break;
       case 'delete':
-        requireAuth(() => setShowDelete(item));
+        setShowDelete(item);
         break;
       case 'rename':
-        requireAuth(async () => {
+        (async () => {
           try {
-            await api.renameItem(currentPath, item.name, item.newName);
+            await api.renameItem(listingPath, item.name, item.newName);
             toast(`Renamed "${item.name}" to "${item.newName}"`);
             refreshFiles();
           } catch (err: any) {
             if (err.message === 'AUTH_REQUIRED') {
               setIsAuth(false);
-              requireAuth(() => handleAction(action, item));
+              toast('Session expired. Please authenticate again.');
             } else {
               toast(`Failed to rename: ${err.message}`);
             }
           }
-        });
+        })();
         break;
       case 'copy-link': {
-        const path = currentPath === '/' ? '' : currentPath;
-        const url = `${window.location.origin}/v${path}/${item.name}`;
+        const path = listingPath === '/' ? '' : listingPath;
+        const url = `${window.location.origin}${encodePath(`/v${path}/${item.name}`)}`;
         navigator.clipboard.writeText(url).catch(() => {});
         toast('Link copied to clipboard');
         break;
       }
       case 'open-tab': {
-        const path = currentPath === '/' ? '' : currentPath;
-        window.open(`/v${path}/${item.name}`, '_blank');
+        const path = listingPath === '/' ? '' : listingPath;
+        window.open(encodePath(`/v${path}/${item.name}`), '_blank');
         break;
       }
     }
   };
 
-  const handleUpload = async (uploadFiles: File[]) => {
+  const handleUpload = async (uploadFiles: File[]): Promise<boolean> => {
     try {
-      const result = await api.uploadFiles(currentPath, uploadFiles);
+      const result = await api.uploadFiles(listingPath, uploadFiles);
       toast(`Uploaded ${result.count} file(s)`);
       setShowUpload(false);
       refreshFiles();
+      return true;
     } catch (err: any) {
       if (err.message === 'AUTH_REQUIRED') {
         setIsAuth(false);
-        toast('Session expired. Please authenticate again.');
+        toast('Session expired. Please authenticate again.', 'error');
+        setShowUpload(false);
       } else {
-        toast(`Upload failed: ${err.message}`);
+        toast(`Upload failed: ${err.message}`, 'error');
       }
-      setShowUpload(false);
+      return false;
     }
   };
 
   const handleCreateFolder = async (name: string) => {
     try {
-      await api.createFolder(currentPath, name);
+      await api.createFolder(listingPath, name);
       toast(`Created folder "${name}"`);
       refreshFiles();
     } catch (err: any) {
@@ -188,7 +211,7 @@ function AppInner() {
   const handleDelete = async () => {
     if (!showDelete) return;
     try {
-      await api.deleteItem(currentPath, showDelete.name, showDelete.type as 'file' | 'folder');
+      await api.deleteItem(listingPath, showDelete.name, showDelete.type as 'file' | 'folder');
       toast(`Deleted "${showDelete.name}"`);
       refreshFiles();
     } catch (err: any) {
@@ -202,10 +225,6 @@ function AppInner() {
   };
 
   const handleMove = async (name: string, fromPath: string, toPath: string) => {
-    if (!isAuth) {
-      requireAuth(() => handleMove(name, fromPath, toPath));
-      return;
-    }
     try {
       await api.moveItem(fromPath, name, toPath);
       toast(`Moved "${name}" to ${toPath}`);
@@ -245,7 +264,7 @@ function AppInner() {
   }
 
   if (viewingFile) {
-    return <FileViewer fileName={viewingFile.name} path={currentPath} onBack={() => setViewingFile(null)} />;
+    return <FileViewer fileName={viewingFile} path={currentPath} onBack={() => navigate(currentPath)} />;
   }
 
   return (
@@ -270,7 +289,7 @@ function AppInner() {
           ) : (
             <button
               className={`auth-badge ${isAuth ? 'auth-badge--unlocked' : ''}`}
-              onClick={() => isAuth ? handleLogout() : setShowPassword(true)}
+              onClick={() => { if (isAuth) handleLogout(); }}
             >
               {isAuth ? <UnlockIcon width={14} height={14} /> : <LockIcon width={14} height={14} />}
               <span>{isAuth ? 'Unlocked' : 'Locked'}</span>
@@ -299,27 +318,39 @@ function AppInner() {
       </header>
 
       <main className="app-main">
-        <ExplorerView
-          currentPath={currentPath}
-          folders={folders}
-          files={files}
-          tree={tree}
-          onNavigate={setCurrentPath}
-          onOpenFile={setViewingFile}
-          onAction={handleAction}
-          onMove={handleMove}
-        />
+        {isAuth && filesLoading && (
+          <div className="empty-state"><p className="empty-state__title">Loading…</p></div>
+        )}
+        {isAuth && !filesLoading && (
+          <ExplorerView
+            currentPath={listingPath}
+            folders={folders}
+            files={files}
+            tree={tree}
+            onNavigate={navigate}
+            onOpenFile={file => navigate(listingPath, file.name)}
+            onAction={handleAction}
+            onMove={handleMove}
+          />
+        )}
       </main>
 
-      {showPassword && (
+      {!isAuth && (
         <PasswordModal
-          onSuccess={handleAuthSuccess}
-          onClose={() => { setShowPassword(false); setPendingAction(null); }}
+          onSuccess={() => setIsAuth(true)}
+          onClose={() => {}}
+          dismissable={false}
           login={api.login}
         />
       )}
       {showNewFolder && <NewFolderModal onClose={() => setShowNewFolder(false)} onCreate={handleCreateFolder} />}
-      {showUpload && <UploadModal onClose={() => setShowUpload(false)} onUpload={handleUpload} />}
+      {showUpload && (
+        <UploadModal
+          onClose={() => setShowUpload(false)}
+          onUpload={handleUpload}
+          existingNames={files.map(f => f.name)}
+        />
+      )}
       {showDelete && (
         <DeleteModal
           itemName={showDelete.name}

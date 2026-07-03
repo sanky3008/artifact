@@ -47,7 +47,13 @@ mcp = FastMCP(
     instructions=(
         "Manage HTML files on Artifact. Files are organized in a folder tree. "
         "Only .html files are supported, max 10 MB each. "
-        "Paths use forward slashes and start from root /."
+        "Paths use forward slashes and start from root /. "
+        "To modify an existing file, prefer edit_file (exact string replacement) "
+        "over update_file — do not resend the whole document for small changes. "
+        "To create a large document, call create_file with the first chunk and "
+        "append_file for each following chunk. "
+        "To read a document from an Artifact share link (https://<host>/v/...), "
+        "use read_file_from_url."
     ),
     auth=auth_provider,
 )
@@ -105,7 +111,7 @@ async def google_callback(request: Request):
 def _resolve(user_path: str) -> Path:
     cleaned = PurePosixPath("/" + user_path.strip("/"))
     resolved = (UPLOAD_DIR / cleaned.relative_to("/")).resolve()
-    if not str(resolved).startswith(str(UPLOAD_DIR.resolve())):
+    if not resolved.is_relative_to(UPLOAD_DIR.resolve()):
         raise ValueError("Invalid path")
     return resolved
 
@@ -185,9 +191,7 @@ def get_file_tree() -> dict:
     return {"tree": walk(UPLOAD_DIR, "/")}
 
 
-@mcp.tool()
-def read_file(path: str) -> dict:
-    """Read an HTML file's content. path should be like /folder/file.html"""
+def _read_file(path: str) -> dict:
     try:
         resolved = _resolve(path)
     except ValueError:
@@ -207,6 +211,26 @@ def read_file(path: str) -> dict:
         "modified": _format_time_ago(stat.st_mtime),
         "bytes": stat.st_size,
     }
+
+
+@mcp.tool()
+def read_file(path: str) -> dict:
+    """Read an HTML file's content. path should be like /folder/file.html"""
+    return _read_file(path)
+
+
+@mcp.tool()
+def read_file_from_url(url: str) -> dict:
+    """Read the Artifact document behind a share link (https://<host>/v/<path>)."""
+    from urllib.parse import urlparse, unquote
+
+    path = unquote(urlparse(url).path)
+    if not path.startswith("/v/"):
+        return {
+            "error": "validation_error",
+            "detail": "Only Artifact share links (https://<host>/v/<path>) are supported",
+        }
+    return _read_file(path[2:])  # strip "/v", keep leading slash
 
 
 @mcp.tool()
@@ -253,6 +277,70 @@ def update_file(path: str, content: str) -> dict:
     resolved.write_text(content, encoding="utf-8")
     stat = resolved.stat()
     return {"ok": True, "name": resolved.name, "path": path, "size": _format_size(stat.st_size), "bytes": stat.st_size}
+
+
+@mcp.tool()
+def edit_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> dict:
+    """Replace exact text in an HTML file. old_str must occur exactly once unless
+    replace_all=true. Use read_file first and copy the exact text to replace.
+    Prefer this over update_file — no need to resend the whole document."""
+    if not old_str:
+        return {"error": "validation_error", "detail": "old_str must not be empty"}
+
+    try:
+        resolved = _resolve(path)
+    except ValueError:
+        return {"error": "invalid_path", "detail": "Path must not escape the upload directory"}
+
+    if not resolved.is_file() or resolved.suffix.lower() != ".html":
+        return {"error": "not_found", "detail": f"File {path} not found"}
+
+    content = resolved.read_text(encoding="utf-8", errors="replace")
+    count = content.count(old_str)
+    if count == 0:
+        return {
+            "error": "not_found_in_file",
+            "detail": "old_str not found — read the file and copy the exact text",
+        }
+    if count > 1 and not replace_all:
+        return {
+            "error": "ambiguous",
+            "detail": f"old_str occurs {count} times; add surrounding context or set replace_all=true",
+        }
+
+    new_content = content.replace(old_str, new_str, -1 if replace_all else 1)
+    if len(new_content.encode("utf-8")) > MAX_FILE_SIZE:
+        return {"error": "size_exceeded", "detail": "Result exceeds 10 MB limit"}
+
+    resolved.write_text(new_content, encoding="utf-8")
+    return {"ok": True, "path": path, "replacements": count if replace_all else 1}
+
+
+@mcp.tool()
+def append_file(path: str, content: str) -> dict:
+    """Append content to the end of an existing HTML file. Use this to build large
+    documents in chunks: create_file with the first chunk, then append_file for each
+    following chunk."""
+    if not content:
+        return {"error": "validation_error", "detail": "content must not be empty"}
+
+    try:
+        resolved = _resolve(path)
+    except ValueError:
+        return {"error": "invalid_path", "detail": "Path must not escape the upload directory"}
+
+    if not resolved.is_file() or resolved.suffix.lower() != ".html":
+        return {"error": "not_found", "detail": f"File {path} not found"}
+
+    if resolved.stat().st_size + len(content.encode("utf-8")) > MAX_FILE_SIZE:
+        return {"error": "size_exceeded", "detail": "Result would exceed 10 MB limit"}
+
+    # ponytail: append-in-place — a viewer refreshing mid-build sees a partial doc
+    # briefly; switch to tmp-file+rename commit if that ever matters.
+    with open(resolved, "a", encoding="utf-8") as f:
+        f.write(content)
+    stat = resolved.stat()
+    return {"ok": True, "path": path, "size": _format_size(stat.st_size), "bytes": stat.st_size}
 
 
 @mcp.tool()

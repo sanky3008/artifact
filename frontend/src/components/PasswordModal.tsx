@@ -5,9 +5,10 @@ interface PasswordModalProps {
   onSuccess: () => void;
   onClose: () => void;
   login: (password: string) => Promise<boolean>;
+  dismissable?: boolean;
 }
 
-export function PasswordModal({ onSuccess, onClose, login }: PasswordModalProps) {
+export function PasswordModal({ onSuccess, onClose, login, dismissable = true }: PasswordModalProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -26,8 +27,8 @@ export function PasswordModal({ onSuccess, onClose, login }: PasswordModalProps)
   };
 
   return (
-    <Modal title="Authentication required" onClose={onClose} width={380}>
-      <p className="modal__desc">Enter the shared password to make changes.</p>
+    <Modal title="Authentication required" onClose={dismissable ? onClose : () => {}} width={380}>
+      <p className="modal__desc">Enter the shared password to continue.</p>
       <form onSubmit={handleSubmit}>
         <div style={{ marginBottom: 16 }}>
           <Input
@@ -41,7 +42,7 @@ export function PasswordModal({ onSuccess, onClose, login }: PasswordModalProps)
           {error && <p className="input-error">Incorrect password. Try again.</p>}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button onClick={onClose}>Cancel</Button>
+          {dismissable && <Button onClick={onClose}>Cancel</Button>}
           <Button variant="primary" onClick={() => handleSubmit()} disabled={loading || !password}>
             {loading ? 'Checking...' : 'Unlock'}
           </Button>

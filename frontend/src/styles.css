@@ -338,6 +338,11 @@ html, body, #root {
   animation: toastIn 0.2s ease-out;
   color: var(--text-primary);
 }
+.toast--error { border-color: var(--danger); color: var(--danger); background: var(--danger-bg); }
+a.breadcrumb__item, a.sidebar-item, .explorer__name-link { text-decoration: none; }
+.explorer__name-link { color: inherit; }
+.explorer__name-link:hover { text-decoration: underline; }
+.upload-file-item__replaces { font-size: 11px; color: var(--danger); white-space: nowrap; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ═══════════════════════════════════════
